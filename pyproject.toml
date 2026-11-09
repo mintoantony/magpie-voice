@@ -1,0 +1,31 @@
+[project]
+name = "magpie-voice"
+version = "0.1.0"
+description = "Local NVIDIA Magpie TTS (NeMo-Speech.cpp, CPU) with CLI, window and MCP server"
+authors = [
+    { name = "Minto Antony", email = "minto.antony@harriscomputer.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "lameenc>=1.9.0",
+    "mcp>=2.3.0",
+    "numpy>=2.5.4",
+    "sounddevice>=0.5.6",
+]
+
+[project.scripts]
+magpie-voice = "magpie_voice.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["engine: needs the real NeMo-Speech engine and models"]
