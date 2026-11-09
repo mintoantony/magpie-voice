@@ -121,6 +121,11 @@ class App:
         def done(s):
             if self._watching != rid:
                 return
+            err = s.get("errors", {}).get(rid)
+            if err:
+                self._set_status(err, error=True)
+                self._watching = None
+                return
             if s["playing"] == rid:
                 self._set_status(f"Speaking {s['progress']}")
             elif rid in s["queued"]:

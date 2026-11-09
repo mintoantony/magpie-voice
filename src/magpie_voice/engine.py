@@ -21,6 +21,9 @@ class Engine:
         self._start_lock = threading.Lock()
 
     # -- lifecycle -------------------------------------------------------
+    def available(self) -> bool:
+        return config.ENGINE_EXE.exists()
+
     def _healthy(self) -> bool:
         try:
             return httpx.get(f"{self.base}/health", timeout=2).status_code == 200

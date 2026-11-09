@@ -19,15 +19,23 @@ def _spawn_daemon(port: int) -> None:
     flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
              | getattr(subprocess, "CREATE_NO_WINDOW", 0)
              | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-    subprocess.Popen([exe, "-m", "magpie_voice", "daemon", "--port", str(port)],
-                     cwd=str(config.ROOT), creationflags=flags, close_fds=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+    args = [exe, "-m", "magpie_voice", "daemon", "--port", str(port)]
+    kw = dict(cwd=str(config.ROOT), close_fds=True, stdin=subprocess.DEVNULL,
+              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # The daemon is shared by every Claude session, so it must outlive the one that
+    # started it: break away from the caller's job object when the job allows it.
+    try:
+        subprocess.Popen(args, creationflags=flags | breakaway, **kw)
+    except OSError:
+        subprocess.Popen(args, creationflags=flags, **kw)
 
 
 class Client:
     def __init__(self, port: int = config.DAEMON_PORT,
-                 spawn: Callable[[], None] | None = None) -> None:
+                 spawn: Callable[[], None] | None = None, start_timeout: float = 60) -> None:
         self.port = port
+        self.start_timeout = start_timeout
         self.base = f"http://127.0.0.1:{port}"
         self._spawn = spawn or (lambda: _spawn_daemon(port))
 
@@ -37,7 +45,8 @@ class Client:
         except httpx.HTTPError:
             return False
 
-    def ensure_daemon(self, timeout: float = 60) -> None:
+    def ensure_daemon(self, timeout: float | None = None) -> None:
+        timeout = self.start_timeout if timeout is None else timeout
         if self._alive():
             return
         self._spawn()
@@ -85,11 +94,15 @@ class Client:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             try:
-                s = self.status()
-            except (httpx.HTTPError, RuntimeError):
-                s = None  # daemon went away; status() restarts it next time round
-            if s is not None and s["playing"] != request_id and request_id not in s["queued"]:
-                return
+                s = self.status()  # restarts the daemon if needed; RuntimeError if it can't
+            except httpx.HTTPError:
+                s = None  # daemon went away mid-call; next round restarts it
+            if s is not None:
+                err = s.get("errors", {}).get(request_id)
+                if err:
+                    raise RuntimeError(err)
+                if s["playing"] != request_id and request_id not in s["queued"]:
+                    return
             if deadline is not None and time.monotonic() > deadline:
                 raise TimeoutError(f"request {request_id} still playing")
             time.sleep(0.3)

@@ -170,3 +170,91 @@ def test_idle_shutdown():
     dm, th = _start(idle_timeout=0.5)
     th.join(5)
     assert not th.is_alive()
+
+
+class BrokenOncePlayer(FakePlayer):
+    def __init__(self):
+        super().__init__()
+        self.fail_next = True
+
+    def play(self, pcm, sample_rate):
+        if self.fail_next:
+            self.fail_next = False
+            raise OSError("audio device disappeared")
+        super().play(pcm, sample_rate)
+
+
+def test_playback_error_does_not_wedge_queue(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    dm, _ = _start(player=BrokenOncePlayer())
+    try:
+        c = Client(port=dm.port, spawn=lambda: None)
+        c.speak("x. " * 600)                       # many chunks; first play raises
+        b = c.speak("after the error.")["id"]
+        c.wait_done(b, timeout=20)                 # must not hang
+    finally:
+        dm.shutdown()
+
+
+class FailingEngine(FakeEngine):
+    def synthesize(self, text, voice, language):
+        raise RuntimeError("engine exploded")
+
+
+def test_synthesis_error_reported_to_waiter(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    player = FakePlayer()
+    dm = Daemon(FailingEngine(), player, port=0)
+    player.daemon = dm
+    threading.Thread(target=dm.serve_forever, daemon=True).start()
+    try:
+        c = Client(port=dm.port, spawn=lambda: None)
+        rid = c.speak("Hello.")["id"]
+        with pytest.raises(RuntimeError, match="engine exploded"):
+            c.wait_done(rid, timeout=10)
+        assert "engine exploded" in c.status()["errors"][rid]
+    finally:
+        dm.shutdown()
+
+
+class MissingEngine(FakeEngine):
+    def available(self):
+        return False
+
+
+def test_speak_fails_fast_when_engine_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    player = FakePlayer()
+    dm = Daemon(MissingEngine(), player, port=0)
+    player.daemon = dm
+    threading.Thread(target=dm.serve_forever, daemon=True).start()
+    try:
+        c = Client(port=dm.port, spawn=lambda: None)
+        with pytest.raises(RuntimeError, match="setup.ps1"):
+            c.speak("Hello.")
+    finally:
+        dm.shutdown()
+
+
+def test_wait_done_gives_up_when_daemon_cannot_restart():
+    c = Client(port=1, spawn=lambda: None, start_timeout=1)   # nothing listens on port 1
+    t = time.monotonic()
+    with pytest.raises(RuntimeError, match="did not start"):
+        c.wait_done("abc", timeout=None)
+    assert time.monotonic() - t < 10
+
+
+def test_spawn_breaks_away_from_job_with_fallback(monkeypatch):
+    import subprocess as sp
+    from magpie_voice import client as client_mod
+    calls = []
+
+    def fake_popen(args, **kw):
+        calls.append(kw["creationflags"])
+        if len(calls) == 1:
+            raise OSError("access denied: job forbids breakaway")
+        return object()
+    monkeypatch.setattr(client_mod.subprocess, "Popen", fake_popen)
+    client_mod._spawn_daemon(47391)
+    assert calls[0] & sp.CREATE_BREAKAWAY_FROM_JOB
+    assert not calls[1] & sp.CREATE_BREAKAWAY_FROM_JOB

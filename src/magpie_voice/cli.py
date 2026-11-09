@@ -60,7 +60,8 @@ def main(argv: list[str] | None = None) -> int:
                 client.stop()
                 return 130
         elif args.cmd == "save":
-            r = client.save(_read_text(args), args.output, args.voice, args.lang,
+            output = str(Path(args.output).absolute()) if args.output else None
+            r = client.save(_read_text(args), output, args.voice, args.lang,
                             args.format, args.overwrite, not args.raw)
             print(r["path"])
         elif args.cmd == "stop":

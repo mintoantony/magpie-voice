@@ -1,4 +1,5 @@
 import io
+from pathlib import Path
 
 import pytest
 
@@ -58,7 +59,7 @@ def test_say_ctrl_c_stops(fc, monkeypatch):
 def test_save_prints_path(fc, capsys):
     assert cli.main(["save", "Hello", "-o", "a.wav", "--format", "wav", "--overwrite", "--raw"]) == 0
     assert "C:\\out\\a.wav" in capsys.readouterr().out
-    assert fc.calls[0] == ("save", "Hello", "a.wav", None, None, "wav", True, False)
+    assert fc.calls[0] == ("save", "Hello", str(Path("a.wav").absolute()), None, None, "wav", True, False)
 
 
 def test_save_file_option_utf8(fc, tmp_path):
@@ -85,3 +86,9 @@ def test_voices_lists(fc, capsys):
     assert cli.main(["voices"]) == 0
     out = capsys.readouterr().out
     assert "Sofia" in out and "en-US" in out
+
+
+def test_save_relative_output_is_from_current_dir(fc, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["save", "Hi", "-o", "hello.wav"])
+    assert fc.calls[0][2] == str(tmp_path / "hello.wav")

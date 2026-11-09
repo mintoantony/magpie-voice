@@ -55,6 +55,7 @@ class Daemon:
         self._synth_queue: deque[Request] = deque()
         self._playing: Request | None = None
         self._done: deque[str] = deque(maxlen=50)
+        self._errors: dict[str, str] = {}
         self._saving = 0
         self._last_activity = time.monotonic()
         self._running = True
@@ -66,6 +67,10 @@ class Daemon:
         voice = config.normalize_voice(body.get("voice"))
         language = config.normalize_language(body.get("language"))
         chunks = text.prepare(str(body.get("text", "")), language)
+        available = getattr(self.engine, "available", None)
+        if available is not None and not available():
+            raise RuntimeError(
+                f"Speech engine not found at {config.ENGINE_EXE}. Run scripts/setup.ps1 first.")
         req = Request(uuid.uuid4().hex[:8], chunks, voice, language)
         with self._cond:
             position = len(self._play_queue) + (1 if self._playing else 0)
@@ -122,7 +127,14 @@ class Daemon:
                 "queued": [r.id for r in self._play_queue],
                 "done": list(self._done),
                 "progress": f"sentence {p.progress} of {len(p.chunks)}" if p else "",
+                "errors": dict(self._errors),
             }
+
+    def _record_error(self, req: Request, err: Exception) -> None:
+        with self._cond:
+            self._errors[req.id] = f"{type(err).__name__}: {err}" if not str(err) else str(err)
+            while len(self._errors) > 50:
+                self._errors.pop(next(iter(self._errors)))
 
     # -- threads -------------------------------------------------------------
     def _touch(self) -> None:
@@ -150,8 +162,10 @@ class Daemon:
                     if req.cancelled:
                         break
                     req.audio.put(pcm)
-            except Exception:
+            except Exception as e:
                 log.exception("synthesis failed for %s", req.id)
+                self._record_error(req, e)
+                req.cancelled = True
                 req.audio.put(None)
             with self._cond:
                 if self._synth_queue and self._synth_queue[0] is req:
@@ -166,6 +180,7 @@ class Daemon:
                     return
                 req = self._play_queue.popleft()
                 self._playing = req
+            finished = False
             try:
                 for i in range(len(req.chunks)):
                     pcm = req.audio.get()
@@ -175,8 +190,16 @@ class Daemon:
                     self.player.play(pcm, config.SAMPLE_RATE)
                     if req.cancelled:
                         break
-            except Exception:
+                else:
+                    finished = True
+            except Exception as e:
                 log.exception("playback failed for %s", req.id)
+                self._record_error(req, e)
+            finally:
+                if not finished:
+                    # Release the synth thread, which may be waiting on this request's run-ahead.
+                    req.cancelled = True
+                    req.audio.put(None)
             with self._cond:
                 self._playing = None
                 self._done.append(req.id)
